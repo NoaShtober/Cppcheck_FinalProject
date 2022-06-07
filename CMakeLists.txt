@@ -1,84 +1,51 @@
-cmake_minimum_required(VERSION 2.8.12)
-project(Cppcheck)
+file(GLOB_RECURSE hdrs "*.h")
+file(GLOB_RECURSE srcs "*.cpp")
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-include(GNUInstallDirs)
-
-include(cmake/compilerCheck.cmake)
-include(cmake/versions.cmake)
-include(cmake/options.cmake)
-include(cmake/findDependencies.cmake)
-include(cmake/compileroptions.cmake)
-include(cmake/compilerDefinitions.cmake)
-include(cmake/buildFiles.cmake)
-include(cmake/cxx11.cmake)
-include(cmake/printInfo.cmake)
-if (BUILD_GUI)
-    include(cmake/qtCompat.cmake)
-endif()
-
-use_cxx11()
-
-file(GLOB addons "addons/*.py")
-file(GLOB cfgs "cfg/*.cfg")
-file(GLOB platforms "platforms/*.xml")
-
-if (LIBXML2_XMLLINT_EXECUTABLE)
-    add_custom_target(validateCFG ${LIBXML2_XMLLINT_EXECUTABLE} --noout ${CMAKE_SOURCE_DIR}/cfg/cppcheck-cfg.rng)
-    foreach(cfg ${cfgs})
-        get_filename_component(cfgname ${cfg} NAME_WE)
-        add_custom_target(validateCFG-${cfgname} ${LIBXML2_XMLLINT_EXECUTABLE} --noout --relaxng ${CMAKE_SOURCE_DIR}/cfg/cppcheck-cfg.rng ${cfg})
-        add_dependencies(validateCFG validateCFG-${cfgname})
-    endforeach()
-
-    add_custom_target(errorlist-xml $<TARGET_FILE:cppcheck> --errorlist > ${CMAKE_BINARY_DIR}/errorlist.xml
-            DEPENDS cppcheck)
-
-    add_custom_target(example-xml $<TARGET_FILE:cppcheck> --xml --enable=all --inconclusive --max-configs=1 ${CMAKE_SOURCE_DIR}/samples 2> ${CMAKE_BINARY_DIR}/example.xml
-            DEPENDS cppcheck)
-
-    add_custom_target(createXMLExamples DEPENDS errorlist-xml example-xml)
-
-    if (PYTHON_EXECUTABLE)
-        add_custom_target(checkCWEEntries ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/listErrorsWithoutCWE.py -F ${CMAKE_BINARY_DIR}/errorlist.xml
-                DEPENDS errorlist-xml)
+function(build_src output filename)
+    get_filename_component(file ${filename} NAME)
+    set(outfile ${CMAKE_CURRENT_BINARY_DIR}/build/mc_${file})
+    set(${output} ${${output}} ${outfile} PARENT_SCOPE)
+    if (USE_MATCHCOMPILER MATCHES "Verify")
+        set(verify_option "--verify")
     endif()
+    add_custom_command(
+        OUTPUT ${outfile}
+        COMMAND ${PYTHON_EXECUTABLE} "${PROJECT_SOURCE_DIR}/tools/matchcompiler.py" 
+                --read-dir="${CMAKE_CURRENT_SOURCE_DIR}" 
+                --prefix="mc_" 
+                --line 
+                ${verify_option} 
+                ${file}
+        DEPENDS ${file} 
+        DEPENDS ${PROJECT_SOURCE_DIR}/tools/matchcompiler.py
+    )
+    set_source_files_properties(${outfile} PROPERTIES GENERATED TRUE)
+endfunction()
 
-    add_custom_target(validateXML ${LIBXML2_XMLLINT_EXECUTABLE} --noout ${CMAKE_SOURCE_DIR}/cppcheck-errors.rng
-            COMMAND ${LIBXML2_XMLLINT_EXECUTABLE} --noout --relaxng ${CMAKE_SOURCE_DIR}/cppcheck-errors.rng ${CMAKE_BINARY_DIR}/errorlist.xml
-            COMMAND ${LIBXML2_XMLLINT_EXECUTABLE} --noout --relaxng ${CMAKE_SOURCE_DIR}/cppcheck-errors.rng ${CMAKE_BINARY_DIR}/example.xml
-            DEPENDS createXMLExamples
-            )
+foreach(file ${srcs})
+    build_src(srcs_build ${file})
+endforeach()
 
-    add_custom_target(validateRules ${LIBXML2_XMLLINT_EXECUTABLE} --noout ${CMAKE_SOURCE_DIR}/rules/*.xml)
+if (NOT USE_MATCHCOMPILER_OPT MATCHES "Off")
+    set(srcs_lib ${srcs_build})
+else()
+    set(srcs_lib ${srcs})
 endif()
 
-if (BUILD_TESTS)
-    enable_testing()
-endif()
-
-add_custom_target(copy_cfg ALL
-    ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/cfg"
-        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${CMAKE_CFG_INTDIR}/cfg"
-    COMMENT "Copying cfg files to ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${CMAKE_CFG_INTDIR}")
-
-add_custom_target(copy_addons ALL
-    ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/addons"
-        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${CMAKE_CFG_INTDIR}/addons"
-    COMMENT "Copying addons files to ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${CMAKE_CFG_INTDIR}")
-
+add_library(lib_objs OBJECT ${srcs_lib} ${hdrs})
+target_include_directories(lib_objs SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/externals/)
 if(USE_BUNDLED_TINYXML2)
-    message(STATUS "Using bundled version of tinyxml2")
-    add_subdirectory(externals/tinyxml2)
+    target_include_directories(lib_objs SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/externals/tinyxml2/)
 endif()
-add_subdirectory(externals/simplecpp)
-add_subdirectory(lib)   # CppCheck Library 
-add_subdirectory(cli)   # Client application
-add_subdirectory(test)  # Tests
-add_subdirectory(gui)   # Graphical application
-add_subdirectory(tools/triage)   # Triage tool
-add_subdirectory(oss-fuzz) # OSS-Fuzz clients
-add_subdirectory(tools)
+target_include_directories(lib_objs SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/externals/picojson/)
+target_include_directories(lib_objs SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/externals/simplecpp/)
+if (HAVE_RULES)
+    target_include_directories(lib_objs SYSTEM PRIVATE ${PCRE_INCLUDE})
+endif()
+if (Boost_FOUND)
+    target_include_directories(lib_objs SYSTEM PRIVATE ${Boost_INCLUDE_DIRS})
+endif()
 
-include(cmake/clang_tidy.cmake)
+if (NOT CMAKE_DISABLE_PRECOMPILE_HEADERS)
+    target_precompile_headers(lib_objs PRIVATE precompiled.h)
+endif()
